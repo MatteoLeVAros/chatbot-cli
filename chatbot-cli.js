@@ -96,7 +96,6 @@ async function summarizeMessages(messagesToSummarize) {
 }
  
 async function compressHistory() {
-
   if (history.length <= 2) {
     return;
   }
@@ -135,6 +134,60 @@ async function compressHistory() {
   }
  
   console.log(`💡 Contexte compressé (${messagesToCompress.length} messages → 1 résumé)`);
+}
+ 
+
+async function resumeConversation() {
+  if (!process.env.MISTRAL_API_KEY) {
+    throw new Error('MISTRAL_API_KEY manquante : nécessaire pour la commande /resume.');
+  }
+ 
+  const conversationMessages = history.slice(1);
+ 
+  if (conversationMessages.length === 0) {
+    return 'Résumé :\n- Commencer une conversation avant de demander un résumé.';
+  }
+ 
+  const conversationText = conversationMessages
+    .map((m) => `${m.role}: ${m.content}`)
+    .join('\n');
+ 
+  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Tu es un assistant spécialisé dans le résumé de conversation. ' +
+            'Résume la conversation en 5 bullet points maximum. ' +
+            'Chaque bullet point doit commencer par "- " suivi d’un verbe. ' +
+            'Conserve uniquement les éléments importants : sujets abordés, décisions, préférences et faits utiles. ' +
+            'Ne mets aucune introduction avant les bullets.'
+        },
+        {
+          role: 'user',
+          content: `Voici la conversation à résumer :\n\n${conversationText}`
+        }
+      ],
+      temperature: 0.3
+    })
+  });
+ 
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Erreur /resume : ${response.status} ${errorText}`);
+  }
+ 
+  const data = await response.json();
+  const summary = data.choices?.[0]?.message?.content?.trim();
+ 
+  return `Résumé :\n${summary || '- Résumé indisponible.'}`;
 }
  
 async function chatStream(userMessage) {
@@ -249,7 +302,7 @@ function printCurrentProvider() {
 }
  
 function closeApp() {
-  console.log('\nAu revoir 👋');
+  console.log('\nAu revoir');
   rl.close();
   process.exit(0);
 }
@@ -266,12 +319,13 @@ async function main() {
     currentProviderName = 'groq';
   }
  
-  console.log('Chatbot CLI — Phase 5');
+  console.log('Chatbot CLI — Phase 6');
   console.log('Commandes disponibles :');
   console.log('  /history            : afficher l’historique');
   console.log('  /provider mistral   : utiliser Mistral');
   console.log('  /provider groq      : utiliser Groq');
   console.log('  /current            : afficher le provider actuel');
+  console.log('  /resume             : résumer la conversation');
   console.log('  /exit               : ctrl C');
  
   printCurrentProvider();
@@ -290,6 +344,16 @@ async function main() {
  
     if (input === '/current') {
       printCurrentProvider();
+      continue;
+    }
+ 
+    if (input === '/resume') {
+      try {
+        const summary = await resumeConversation();
+        console.log(`${summary}\n`);
+      } catch (error) {
+        console.error(`Erreur : ${error.message}\n`);
+      }
       continue;
     }
  
