@@ -33,6 +33,25 @@ const PROVIDERS = {
   }
 };
  
+
+const PRICING = {
+  mistral: {
+    inputPerMillion: 0.10,
+    outputPerMillion: 0.30
+  },
+  groq: {
+    inputPerMillion: 0.59,
+    outputPerMillion: 0.79
+  }
+};
+ 
+const sessionMetrics = {
+  requestCount: 0,
+  estimatedInputTokens: 0,
+  estimatedOutputTokens: 0,
+  estimatedCostUsd: 0
+};
+ 
 let currentProviderName = 'mistral';
  
 function switchProvider(name) {
@@ -49,6 +68,39 @@ function switchProvider(name) {
  
   currentProviderName = normalized;
   return true;
+}
+ 
+
+function estimateTokensFromText(text) {
+  return Math.ceil((text || '').length / 4);
+}
+ 
+function estimateTokensFromMessages(messages) {
+  return messages.reduce((total, message) => {
+    return total + estimateTokensFromText(message.content);
+  }, 0);
+}
+ 
+function estimateCostUsd(providerName, inputTokens, outputTokens) {
+  const pricing = PRICING[providerName];
+ 
+  if (!pricing) {
+    return 0;
+  }
+ 
+  const inputCost = (inputTokens / 1_000_000) * pricing.inputPerMillion;
+  const outputCost = (outputTokens / 1_000_000) * pricing.outputPerMillion;
+ 
+  return inputCost + outputCost;
+}
+ 
+function printRequestMetrics({ latencyMs, inputTokens, outputTokens, costUsd }) {
+  console.log(
+    `[métriques] latence: ${latencyMs} ms | ` +
+    `tokens estimés: in ${inputTokens} / out ${outputTokens} | ` +
+    `coût estimé requête: $${costUsd.toFixed(6)} | ` +
+    `coût session: $${sessionMetrics.estimatedCostUsd.toFixed(6)}\n`
+  );
 }
  
 async function summarizeMessages(messagesToSummarize) {
@@ -190,6 +242,55 @@ async function resumeConversation() {
   return `Résumé :\n${summary || '- Résumé indisponible.'}`;
 }
  
+
+async function translateLast(targetLanguage) {
+  if (!process.env.MISTRAL_API_KEY) {
+    throw new Error('MISTRAL_API_KEY manquante : nécessaire pour la commande /translate.');
+  }
+ 
+  const lastAssistantMessage = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant');
+ 
+  if (!lastAssistantMessage) {
+    return 'Traduction :\n- Aucun message de l’assistant à traduire pour le moment.';
+  }
+ 
+  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages: [
+        {
+          role: 'system',
+          content:
+            `Tu es un traducteur professionnel. Traduis le texte fourni en ${targetLanguage}. ` +
+            'Retourne uniquement la traduction, sans commentaires, sans introduction.'
+        },
+        {
+          role: 'user',
+          content: lastAssistantMessage.content
+        }
+      ],
+      temperature: 0.1
+    })
+  });
+ 
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Erreur /translate : ${response.status} ${errorText}`);
+  }
+ 
+  const data = await response.json();
+  const translatedText = data.choices?.[0]?.message?.content?.trim();
+ 
+  return `Traduction : ${translatedText || 'Traduction indisponible.'}`;
+}
+ 
 async function chatStream(userMessage) {
   const provider = PROVIDERS[currentProviderName];
  
@@ -202,6 +303,10 @@ async function chatStream(userMessage) {
     await compressHistory();
   }
  
+  const requestMessages = [...history];
+  const inputTokensEstimate = estimateTokensFromMessages(requestMessages);
+  const startTime = Date.now();
+ 
   const response = await fetch(provider.url, {
     method: 'POST',
     headers: {
@@ -210,7 +315,7 @@ async function chatStream(userMessage) {
     },
     body: JSON.stringify({
       model: provider.model,
-      messages: history,
+      messages: requestMessages,
       temperature: 0.7,
       stream: true
     })
@@ -265,7 +370,7 @@ async function chatStream(userMessage) {
             fullContent += delta;
           }
         } catch {
-
+         
         }
       }
     }
@@ -276,6 +381,26 @@ async function chatStream(userMessage) {
   history.push({
     role: 'assistant',
     content: fullContent
+  });
+ 
+  const latencyMs = Date.now() - startTime;
+  const outputTokensEstimate = estimateTokensFromText(fullContent);
+  const requestCostUsd = estimateCostUsd(
+    currentProviderName,
+    inputTokensEstimate,
+    outputTokensEstimate
+  );
+ 
+  sessionMetrics.requestCount += 1;
+  sessionMetrics.estimatedInputTokens += inputTokensEstimate;
+  sessionMetrics.estimatedOutputTokens += outputTokensEstimate;
+  sessionMetrics.estimatedCostUsd += requestCostUsd;
+ 
+  printRequestMetrics({
+    latencyMs,
+    inputTokens: inputTokensEstimate,
+    outputTokens: outputTokensEstimate,
+    costUsd: requestCostUsd
   });
  
   return fullContent;
@@ -301,8 +426,17 @@ function printCurrentProvider() {
   console.log(`Provider actuel : ${currentProviderName} (${provider.model})\n`);
 }
  
+function printSessionMetrics() {
+  console.log('--- Métriques session ---');
+  console.log(`Requêtes              : ${sessionMetrics.requestCount}`);
+  console.log(`Tokens input estimés  : ${sessionMetrics.estimatedInputTokens}`);
+  console.log(`Tokens output estimés : ${sessionMetrics.estimatedOutputTokens}`);
+  console.log(`Coût estimé session   : $${sessionMetrics.estimatedCostUsd.toFixed(6)}`);
+  console.log('------------------------\n');
+}
+ 
 function closeApp() {
-  console.log('\nAu revoir');
+  console.log('\nAu revoir 👋');
   rl.close();
   process.exit(0);
 }
@@ -319,14 +453,16 @@ async function main() {
     currentProviderName = 'groq';
   }
  
-  console.log('Chatbot CLI — Phase 6');
+  console.log('Chatbot CLI — Phase 7');
   console.log('Commandes disponibles :');
-  console.log('  /history            : afficher l’historique');
-  console.log('  /provider mistral   : utiliser Mistral');
-  console.log('  /provider groq      : utiliser Groq');
-  console.log('  /current            : afficher le provider actuel');
-  console.log('  /resume             : résumer la conversation');
-  console.log('  /exit               : ctrl C');
+  console.log('  /history                 : afficher l’historique');
+  console.log('  /provider mistral        : utiliser Mistral');
+  console.log('  /provider groq           : utiliser Groq');
+  console.log('  /current                 : afficher le provider actuel');
+  console.log('  /resume                  : résumer la conversation');
+  console.log('  /translate <langue>      : traduire le dernier message IA');
+  console.log('  /metrics                 : afficher les métriques de session');
+  console.log('  /exit                    : ctrl C');
  
   printCurrentProvider();
  
@@ -347,6 +483,11 @@ async function main() {
       continue;
     }
  
+    if (input === '/metrics') {
+      printSessionMetrics();
+      continue;
+    }
+ 
     if (input === '/resume') {
       try {
         const summary = await resumeConversation();
@@ -354,6 +495,29 @@ async function main() {
       } catch (error) {
         console.error(`Erreur : ${error.message}\n`);
       }
+      continue;
+    }
+ 
+    if (input === '/translate') {
+      console.log('Usage : /translate <langue>\n');
+      continue;
+    }
+ 
+    if (input.startsWith('/translate ')) {
+      const targetLanguage = input.slice('/translate '.length).trim();
+ 
+      if (!targetLanguage) {
+        console.log('Usage : /translate <langue>\n');
+        continue;
+      }
+ 
+      try {
+        const translated = await translateLast(targetLanguage);
+        console.log(`${translated}\n`);
+      } catch (error) {
+        console.error(`Erreur : ${error.message}\n`);
+      }
+ 
       continue;
     }
  
