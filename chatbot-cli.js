@@ -18,6 +18,8 @@ const history = [
   }
 ];
  
+const MAX_HISTORY = 20;
+ 
 const PROVIDERS = {
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
@@ -49,6 +51,92 @@ function switchProvider(name) {
   return true;
 }
  
+async function summarizeMessages(messagesToSummarize) {
+  if (!process.env.MISTRAL_API_KEY) {
+    throw new Error('MISTRAL_API_KEY manquante : nécessaire pour la compression automatique.');
+  }
+ 
+  const conversationText = messagesToSummarize
+    .map((m) => `${m.role}: ${m.content}`)
+    .join('\n');
+ 
+  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Tu résumes une conversation en 3 à 5 phrases maximum. ' +
+            'Conserve uniquement les faits importants, les préférences utilisateur, ' +
+            'les décisions prises et le contexte utile pour continuer la conversation. ' +
+            'Sois factuel, concis, et n’ajoute aucune information.'
+        },
+        {
+          role: 'user',
+          content: `Voici la conversation à résumer :\n\n${conversationText}`
+        }
+      ],
+      temperature: 0.3
+    })
+  });
+ 
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Erreur pendant la compression du contexte : ${response.status} ${errorText}`);
+  }
+ 
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content?.trim() || 'Résumé indisponible.';
+}
+ 
+async function compressHistory() {
+
+  if (history.length <= 2) {
+    return;
+  }
+ 
+  const lastMessage = history[history.length - 1];
+  const keepLastUserMessage = lastMessage?.role === 'user';
+ 
+  const messagesToCompress = keepLastUserMessage
+    ? history.slice(1, -1)
+    : history.slice(1);
+ 
+  if (messagesToCompress.length === 0) {
+    return;
+  }
+ 
+  const summary = await summarizeMessages(messagesToCompress);
+ 
+  if (keepLastUserMessage) {
+    history.splice(
+      1,
+      history.length - 2,
+      {
+        role: 'system',
+        content: `Résumé de la conversation précédente : ${summary}`
+      }
+    );
+  } else {
+    history.splice(
+      1,
+      history.length - 1,
+      {
+        role: 'system',
+        content: `Résumé de la conversation précédente : ${summary}`
+      }
+    );
+  }
+ 
+  console.log(`💡 Contexte compressé (${messagesToCompress.length} messages → 1 résumé)`);
+}
+ 
 async function chatStream(userMessage) {
   const provider = PROVIDERS[currentProviderName];
  
@@ -56,6 +144,10 @@ async function chatStream(userMessage) {
     role: 'user',
     content: userMessage
   });
+ 
+  if (history.length - 1 > MAX_HISTORY) {
+    await compressHistory();
+  }
  
   const response = await fetch(provider.url, {
     method: 'POST',
@@ -120,7 +212,7 @@ async function chatStream(userMessage) {
             fullContent += delta;
           }
         } catch {
-         
+
         }
       }
     }
@@ -174,13 +266,13 @@ async function main() {
     currentProviderName = 'groq';
   }
  
-  console.log('Chatbot CLI — Phase 4 ');
+  console.log('Chatbot CLI — Phase 5');
   console.log('Commandes disponibles :');
   console.log('  /history            : afficher l’historique');
   console.log('  /provider mistral   : utiliser Mistral');
   console.log('  /provider groq      : utiliser Groq');
   console.log('  /current            : afficher le provider actuel');
-  console.log('  /exit               : quitter\n');
+  console.log('  /exit               : ctrl C');
  
   printCurrentProvider();
  
