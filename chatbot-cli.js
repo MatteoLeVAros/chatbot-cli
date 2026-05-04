@@ -18,20 +18,53 @@ const history = [
   }
 ];
  
+const PROVIDERS = {
+  mistral: {
+    url: 'https://api.mistral.ai/v1/chat/completions',
+    key: process.env.MISTRAL_API_KEY,
+    model: 'mistral-small-latest'
+  },
+  groq: {
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    key: process.env.GROQ_API_KEY,
+    model: 'llama-3.3-70b-versatile'
+  }
+};
+ 
+let currentProviderName = 'mistral';
+ 
+function switchProvider(name) {
+  const normalized = name.trim().toLowerCase();
+ 
+  if (!PROVIDERS[normalized]) {
+    return false;
+  }
+ 
+  if (!PROVIDERS[normalized].key) {
+    console.log(`Clé API manquante pour "${normalized}" dans le fichier .env`);
+    return false;
+  }
+ 
+  currentProviderName = normalized;
+  return true;
+}
+ 
 async function chatStream(userMessage) {
+  const provider = PROVIDERS[currentProviderName];
+ 
   history.push({
     role: 'user',
     content: userMessage
   });
  
-  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+  const response = await fetch(provider.url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${provider.key}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-latest',
+      model: provider.model,
       messages: history,
       temperature: 0.7,
       stream: true
@@ -40,11 +73,11 @@ async function chatStream(userMessage) {
  
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Erreur API Mistral : ${response.status} ${errorText}`);
+    throw new Error(`Erreur API ${currentProviderName} : ${response.status} ${errorText}`);
   }
  
   if (!response.body) {
-    throw new Error('Réponse sans body stream.');
+    throw new Error('Réponse sans body.');
   }
  
   const reader = response.body.getReader();
@@ -52,11 +85,11 @@ async function chatStream(userMessage) {
  
   let fullContent = '';
   let buffer = '';
-  let streamFinished = false;
+  let finished = false;
  
   process.stdout.write('IA : ');
  
-  while (!streamFinished) {
+  while (!finished) {
     const { done, value } = await reader.read();
     if (done) break;
  
@@ -71,15 +104,15 @@ async function chatStream(userMessage) {
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
  
-        const jsonStr = line.slice(5).trim();
+        const data = line.slice(5).trim();
  
-        if (jsonStr === '[DONE]') {
-          streamFinished = true;
+        if (data === '[DONE]') {
+          finished = true;
           break;
         }
  
         try {
-          const parsed = JSON.parse(jsonStr);
+          const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta?.content;
  
           if (delta) {
@@ -87,18 +120,14 @@ async function chatStream(userMessage) {
             fullContent += delta;
           }
         } catch {
-
+         
         }
       }
     }
   }
  
-
-  buffer += decoder.decode();
- 
   process.stdout.write('\n\n');
  
-
   history.push({
     role: 'assistant',
     content: fullContent
@@ -122,26 +151,80 @@ function printHistory() {
   console.log('--------------------------\n');
 }
  
-console.log('Chatbot CLI — Phase 3 : streaming + mémoire conversationnelle.');
-console.log('Commandes disponibles :');
-console.log('  /history : afficher l’historique interne');
-console.log('(Ctrl+C pour quitter)\n');
+function printCurrentProvider() {
+  const provider = PROVIDERS[currentProviderName];
+  console.log(`Provider actuel : ${currentProviderName} (${provider.model})\n`);
+}
  
-while (true) {
-  const input = await question('Vous : ');
+function closeApp() {
+  console.log('\nAu revoir 👋');
+  rl.close();
+  process.exit(0);
+}
  
-  if (!input.trim()) {
-    continue;
+process.on('SIGINT', closeApp);
+ 
+async function main() {
+  if (!process.env.MISTRAL_API_KEY && !process.env.GROQ_API_KEY) {
+    console.error('Erreur : aucune clé Mistral ou Groq trouvée dans .env');
+    process.exit(1);
   }
  
-  if (input === '/history') {
-    printHistory();
-    continue;
+  if (!PROVIDERS[currentProviderName].key && PROVIDERS.groq.key) {
+    currentProviderName = 'groq';
   }
  
-  try {
-    await chatStream(input);
-  } catch (error) {
-    console.error(`Erreur : ${error.message}\n`);
+  console.log('Chatbot CLI — Phase 4 ');
+  console.log('Commandes disponibles :');
+  console.log('  /history            : afficher l’historique');
+  console.log('  /provider mistral   : utiliser Mistral');
+  console.log('  /provider groq      : utiliser Groq');
+  console.log('  /current            : afficher le provider actuel');
+  console.log('  /exit               : quitter\n');
+ 
+  printCurrentProvider();
+ 
+  while (true) {
+    const input = await question('Vous : ');
+ 
+    if (!input.trim()) {
+      continue;
+    }
+ 
+    if (input === '/history') {
+      printHistory();
+      continue;
+    }
+ 
+    if (input === '/current') {
+      printCurrentProvider();
+      continue;
+    }
+ 
+    if (input === '/exit') {
+      closeApp();
+    }
+ 
+    if (input.startsWith('/provider ')) {
+      const providerName = input.slice('/provider '.length).trim();
+      const ok = switchProvider(providerName);
+ 
+      if (ok) {
+        const provider = PROVIDERS[currentProviderName];
+        console.log(`Provider changé : ${currentProviderName} (${provider.model})\n`);
+      } else {
+        console.log('Provider inconnu ou clé absente. Choisis : mistral, groq\n');
+      }
+ 
+      continue;
+    }
+ 
+    try {
+      await chatStream(input);
+    } catch (error) {
+      console.error(`Erreur : ${error.message}\n`);
+    }
   }
 }
+ 
+main();
